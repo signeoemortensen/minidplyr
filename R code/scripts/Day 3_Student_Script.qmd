@@ -1,0 +1,686 @@
+---
+title: "A297/07 Advanced R"
+subtitle: "Day 3 -- Student Version (Guided Worksheet)"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+editor: visual
+---
+
+This document follows the Day 3 slides. Run the code chunks together with the presentation, and complete the exercises in the marked spaces.
+
+::: callout-note
+Section 3 (strategies for writing efficient R code) is still a placeholder, waiting on the rest of the Day 3 slides. Sections 1 and 2.1--2.3 follow `Day3_TG.pptx` and `ggplot.pptx`.
+:::
+
+## Section 1. Working with missing values and factors
+
+**Goal:**
+
+- Detect, summarise, and handle missing values (NA) safely
+- Recode and reorder categorical data using factors
+
+### Missing values in base R
+
+We work with the NHANES dataset (US National Health and Nutrition Examination Survey) -- demographic, examination, and lab data. `nhanes_sub` is a provided subset (see the course data files) -- load it with:
+
+```{r}
+#| label: load-packages-day3
+library(dplyr)
+library(forcats)
+library(ggplot2)
+
+nhanes_sub <-readRDS("~/PhD/01_Admin/Kurser_og_ECTS/06. Avanced R/minidplyr/R code/data/raw_data/nhanes_sub.RDS")
+```
+
+Before analysing a dataset: how much is missing, and where?
+
+```{r}
+nrow(nhanes_sub)
+colSums(is.na(nhanes_sub))
+```
+
+Missing values are not just a technical inconvenience -- dropping every incomplete row can lose a meaningful part of the dataset, and can bias estimates if the missingness is not random. Is BMI equally likely to be missing in every age group?
+
+```{r}
+nhanes_sub %>%
+  mutate(
+    age_group = cut(
+      Age,
+      breaks = c(-Inf, 30, 45, 60, Inf),
+      labels = c("<30", "31-45", "46-60", "60+")
+    )
+  ) %>%
+  group_by(age_group) %>%
+  summarise(
+    n = n(),
+    pct_bmi_missing = round(mean(is.na(BMI)) * 100, 1),
+    .groups = "drop"
+  )
+```
+
+NA propagates through calculations -- R won't guess an answer from incomplete information unless you explicitly ask it to:
+
+```{r}
+mean(nhanes_sub$BPSysAve)
+mean(nhanes_sub$BPSysAve, na.rm = TRUE)
+sum(nhanes_sub$BPSysAve)
+sum(nhanes_sub$BPSysAve, na.rm = TRUE)
+```
+
+NA is not the only special value. `NULL` is the "undefined" value -- `is.null()` checks it, and `NULL` is silently dropped when combined into a vector:
+
+```{r}
+is.null(NULL)
+my_vector <- c(25, NA, 10, NULL)
+my_vector
+```
+
+`NaN`: "not a number" -- e.g. `0/0`. Check with `is.nan()`:
+
+```{r}
+0 / 0
+is.nan(0 / 0)
+```
+
+`Inf`: an infinite value, e.g. dividing by 0. Check with `is.finite()`:
+
+```{r}
+1 / 0
+is.finite(1 / 0)
+```
+
+`Inf` and `NaN` are **not** removed by `na.rm = TRUE` -- use `is.finite()` to subset to only finite values when that's what you need:
+
+```{r}
+z <- c(1, 22, NA, Inf, NaN, 5)
+max(z, na.rm = TRUE)          # still Inf!
+max(z[is.finite(z)])          # the actual largest finite value
+```
+
+"NAs introduced by coercion": an illegal conversion (e.g. text that isn't a number) silently becomes NA, with a warning:
+
+```{r}
+as.numeric(c("10", "20", "thirty", "40"))
+```
+
+NULL is ignored in a vector.
+
+```{r}
+my_vector <- c(25, NA, 10, NULL)	# define
+my_vector	# print
+```
+
+```{r}
+# Variance of a single number is undefined
+var(22)
+```
+
+If you need to write NA explicitly for a specific type:
+
+- `NA` -- dates or logical `TRUE`/`FALSE`
+- `NA_character_` -- character columns
+- `NA_real_` -- numeric columns
+
+### Finding and removing incomplete rows
+
+`complete.cases()`: logical vector, `TRUE` where a row has no NAs at all.
+
+```{r}
+sum(complete.cases(nhanes_sub))
+sum(!complete.cases(nhanes_sub))
+```
+
+```{r}
+nhanes_sub[complete.cases(nhanes_sub), ]   # keep only complete rows
+nhanes_sub[!complete.cases(nhanes_sub), ]  # inspect the incomplete rows
+```
+
+`na.omit()`: a shorter way to remove incomplete rows -- but it can silently remove a lot of data, so always check how much is lost first.
+
+```{r}
+na.omit(nhanes_sub)
+```
+
+### Missing values with dplyr and naniar
+
+Instead of checking every variable separately...
+
+```{r}
+sum(is.na(nhanes_sub$BMI))
+sum(is.na(nhanes_sub$BPSysAve))
+```
+
+...apply the same operation to every column with `across()`:
+
+```{r}
+nhanes_sub %>%
+  summarise(across(everything(), ~ sum(is.na(.x))))
+```
+
+Percentages instead of counts:
+
+```{r}
+nhanes_sub %>%
+  summarise(across(everything(), ~ round(mean(is.na(.x)) * 100, 1)))
+```
+
+The naniar package gives the same missingness habit as one number or one plot instead of a wide table:
+
+```{r}
+# install.packages("naniar")
+library(naniar)
+pct_miss(nhanes_sub)
+n_miss(nhanes_sub)
+gg_miss_var(nhanes_sub, show_pct = TRUE)
+gg_miss_var(nhanes_sub, show_pct = TRUE, facet = Gender)
+```
+
+`geom_miss_point()`: visualise missingness directly in a scatterplot -- by default `ggplot()` just drops points with a missing value.
+
+```{r}
+ggplot(data = nhanes_sub, mapping = aes(x = BMI, y = BPSysAve)) +
+  geom_miss_point()
+```
+
+`gg_miss_fct()`: a heatmap of percent missingness by a factor column.
+
+```{r}
+gg_miss_fct(nhanes_sub, Education)
+```
+
+### Filling in missing values: coalesce()
+
+`coalesce()` moves left to right and returns the first non-missing value -- e.g. the first available systolic BP reading per participant.
+
+```{r}
+nhanes_sub %>%
+  mutate(bp_first_available = coalesce(BPSys1, BPSys2, BPSys3)) %>%
+  select(ID, BPSys1, BPSys2, BPSys3, bp_first_available)
+```
+
+### Exercise 1.1 (5 min)
+
+Using `nhanes_sub`, create a new variable called `BMI_demo`. For participants with an observed BMI, keep the original value. For participants with a missing BMI, replace it with the median BMI calculated from the observed values in `nhanes_sub`. Then display only: `ID`, original `BMI`, new `BMI_demo`. Use `mutate()`, `coalesce()`, and `median()`.
+
+(Replacing missing values with the median is shown here only to demonstrate the R syntax -- it is not automatically an appropriate statistical strategy for a real analysis.)
+
+```{r}
+# Your code here
+?if_else
+
+nhanes_sub <- nhanes_sub %>% 
+  mutate(BMI_demo = if_else(!is.na(BMI), BMI, mean(BMI)) 
+
+view(nhanes_sub)
+
+```
+
+### Conditional transformations: case_when() and if_else()
+
+`case_when()`: several ordered conditions, one new column.
+
+```{r}
+nhanes_sub %>%
+  mutate(
+    age_group = case_when(
+      is.na(Age) ~ NA,
+      Age < 40 ~ "under 40",
+      Age < 65 ~ "40-64",
+      Age >= 65 ~ "65+"
+    )
+  ) %>%
+  select(ID, Age, age_group)
+```
+
+`case_when()` evaluates conditions top to bottom and uses the **first** one that is `TRUE` -- order matters! Put specific conditions first, and use `.default` as the final catch-all instead of spelling out the last condition explicitly:
+
+```{r}
+nhanes_sub %>%
+  mutate(
+    age_group = case_when(
+      is.na(Age) ~ NA,
+      Age < 40 ~ "under 40",
+      Age < 65 ~ "40-64",
+      .default = "65+"
+    )
+  ) %>%
+  select(ID, Age, age_group)
+```
+
+`if_else()`: convenient for one binary condition.
+
+```{r}
+dplyr::if_else(nhanes_sub$BPSysAve >= 140, ">=140", "<140")
+```
+
+Missing blood-pressure values stay missing by default -- handle them explicitly with the `missing =` argument:
+
+```{r}
+dplyr::if_else(
+  nhanes_sub$BPSysAve >= 140, ">=140", "<140",
+  missing = "not measured"
+)
+```
+
+`dplyr::if_else()` is stricter about output types than base `ifelse()` -- this catches accidental type-mixing that `ifelse()` would silently coerce instead:
+
+```{r}
+#| error: true
+dplyr::if_else(nhanes_sub$BPSysAve >= 140, "high", 0)
+```
+
+### Exercise 2.1 (5 min)
+
+Create a variable called `bmi_category` using the standard adult BMI categories:
+
+- `"underweight"`: BMI \< 18.5
+- `"normal"`: 18.5 to \<25
+- `"overweight"`: 25 to \<30
+- `"obese"`: BMI ≥30
+- a missing BMI should remain missing
+
+```{r}
+# Your code here
+
+```
+
+### Factors
+
+Factor order matters. `HealthGen` records self-reported general health, and its levels are already in a meaningful (non-alphabetical) order: Excellent -\> Vgood -\> Good -\> Fair -\> Poor.
+
+```{r}
+levels(nhanes_sub$HealthGen)
+```
+
+If you convert back to character and recreate the factor without specifying an order, R falls back to its (alphabetical) default:
+
+```{r}
+health_default <- factor(as.character(nhanes_sub$HealthGen))
+levels(health_default)
+```
+
+`fct_relevel()`: set an explicit order (e.g. for a figure running from Poor -\> Excellent).
+
+```{r}
+health_ordered <- fct_relevel(
+  health_default,
+  "Poor", "Fair", "Good", "Vgood", "Excellent"
+)
+levels(health_ordered)
+```
+
+`fct_reorder()`: reorder categories by another variable, rather than a fixed order you specify by hand -- very useful in ggplot2, where categories are often ordered by the value being plotted.
+
+```{r}
+education_bmi <- nhanes_sub %>%
+  filter(!is.na(Education), !is.na(BMI)) %>%
+  group_by(Education) %>%
+  summarise(mean_bmi = mean(BMI))
+education_bmi
+
+education_bmi <- education_bmi %>%
+  mutate(Education = fct_reorder(Education, mean_bmi))
+levels(education_bmi$Education)
+```
+
+`fct_relevel()` = you already know the order you want. `fct_reorder()` = the order should come from another variable.
+
+`fct_recode()`: rename a level, without changing the underlying category.
+
+```{r}
+fct_recode(nhanes_sub$MaritalStatus, "Partnered" = "LivePartner")
+```
+
+`fct_collapse()`: combine several levels into one -- only do this when the grouping is substantively appropriate, since it changes what the variable represents.
+
+```{r}
+fct_collapse(
+  nhanes_sub$MaritalStatus,
+  NotMarried = c("Divorced", "Separated", "Widowed", "NeverMarried")
+)
+```
+
+`fct_lump_n()`: keep the n most frequent levels, combine the rest into "Other".
+
+```{r}
+marital_full <- nhanes_sub %>%
+  filter(!is.na(MaritalStatus)) %>%
+  pull(MaritalStatus)
+fct_count(marital_full, sort = TRUE)
+fct_count(fct_lump_n(marital_full, n = 3), sort = TRUE)
+```
+
+`fct_infreq()`: order levels from most common to least common.
+
+```{r}
+fct_count(fct_infreq(marital_full))
+```
+
+## Section 2.1. Data visualization with ggplot2 I: choosing plots and core grammar
+
+**Goal:**
+
+- Understand the grammar of graphics: data, `aes()`, and geoms
+- Build a basic plot and map variables to aesthetics
+
+### Walkthrough (follow along with the slides)
+
+ggplot is a package for making plots -- compared to base R plotting, you can customize plots much more easily.
+
+All ggplots can be built from variations of this basic form:
+
+```         
+ggplot(data = <data>) + <geom_function>(mapping = aes(<mappings>))
+```
+
+There are countless options -- the cheat sheet is your friend: <https://rstudio.github.io/cheatsheets/data-visualization.pdf>
+
+```{r}
+library(ggplot2)
+
+# We use the iris dataset already built into R (most online ggplot
+# tutorials use it too, so it's worth getting used to)
+iris
+```
+
+```{r}
+# geom_point(): a basic scatterplot
+ggplot(data = iris) +
+  geom_point(mapping = aes(x = Sepal.Length, y = Sepal.Width))
+```
+
+```{r}
+# Add colors based on a categorical variable: col/color
+ggplot(data = iris) +
+  geom_point(mapping = aes(x = Sepal.Length, y = Sepal.Width, color = Species))
+```
+
+```{r}
+# You can add more than one geom_function
+ggplot(data = iris) +
+  geom_point(mapping = aes(x = Petal.Length, y = Petal.Width, color = Species)) +
+  geom_line(mapping = aes(x = Petal.Length, y = Petal.Width, color = Species))
+```
+
+```{r}
+# Avoid redundancy: data and aes() shared in ggplot() apply to every geom
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species)) +
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+# Change appearance of items: shape, size, lwd (line width)
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species, shape = Species)) +
+  geom_point(size = 3) +
+  geom_line(lwd = 1)
+```
+
+```{r}
+# Grouping: without a group, geom_line() connects ALL points in one line
+ggplot(iris, aes(Petal.Length, Petal.Width)) +
+  geom_point(aes(col = Species)) +
+  geom_line()
+```
+
+```{r}
+# Grouping: group draws a separate line per Species
+ggplot(iris, aes(Petal.Length, Petal.Width)) +
+  geom_point(aes(col = Species)) +
+  geom_line(aes(group = Species))
+```
+
+```{r}
+# Layers: be aware of the order! Later layers are drawn on top of earlier ones
+ggplot(iris, aes(Petal.Length, Petal.Width)) +
+  geom_line(aes(group = Species)) +
+  geom_point(aes(col = Species))
+```
+
+### Exercise (10 min)
+
+Try to recreate the plot shown on the slide: a scatterplot of `Petal.Length` (x) vs `Petal.Width` (y) from `iris`, with points colored **and** shaped by `Species`, drawn a bit larger and semi-transparent.
+
+```{r}
+# Your code here
+
+```
+
+## Section 2.2. Data visualization with ggplot2 II: faceting, themes, and labels
+
+**Goal:**
+
+- Split plots into panels with `facet_wrap()`/`facet_grid()`
+- Adjust themes and axis/plot labels
+
+### Walkthrough (follow along with the slides)
+
+`facet_grid()`: split a plot into panels by a variable.
+
+```{r}
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species)) +
+  geom_point() +
+  facet_grid(cols = vars(Species))
+```
+
+`facet_grid()` vs `facet_wrap()`: `facet_grid()` will still display a panel for combinations that are empty; `facet_wrap()` will not.
+
+```{r}
+iris_extra <- iris %>%
+  mutate(is_pretty = sample(c("ugly", "pretty"), nrow(iris), replace = TRUE))
+
+ggplot(iris_extra, aes(Petal.Length, Petal.Width, col = Species)) +
+  geom_point() +
+  facet_grid(Species ~ is_pretty)
+
+ggplot(iris_extra, aes(Petal.Length, Petal.Width, col = Species)) +
+  geom_point() +
+  facet_wrap(Species ~ is_pretty, nrow = 3)
+```
+
+::: callout-note
+**Practical point:** you can often avoid having to combine plots afterwards if you facet cleverly instead. patchwork (used later today) is great for combining a handful of different plots with annotations (A, B, ...), but for grids of many similar plots (e.g. simulation studies), facets are usually the better choice.
+:::
+
+```{r}
+# Scaling of axes
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species, shape = Species)) +
+  geom_point(size = 3) +
+  scale_x_log10(breaks = 1:7)
+```
+
+```{r}
+# Themes and titles
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species)) +
+  geom_point() +
+  theme_bw() +
+  labs(
+    title = "Petal width against petal length",
+    x = "Petal length",
+    y = "Petal width"
+  )
+```
+
+There are many built-in themes beyond `theme_bw()` -- see <https://statisticsglobe.com/ggplot2-themes-r>.
+
+## Section 2.3. Polishing figures: scales, annotations, and publication-ready plots
+
+**Goal:**
+
+- Adjust scales, add annotations, and combine plots
+- Save figures in a publication-ready format
+
+### Walkthrough (follow along with the slides)
+
+Example dataset for a forest plot (simulated):
+
+```{r}
+df <- data.frame(
+  estimate = runif(6, 0.8, 2.5),
+  disorder = factor(rep(c("Schizophrenia", "Depression", "ADHD"), 2)),
+  sex = factor(c(rep("Male", 3), rep("Female", 3)))
+) %>%
+  rowwise() %>%
+  mutate(
+    upper = runif(1, estimate, estimate + runif(1, 0, 1)),
+    lower = runif(1, estimate - runif(1, 0, 0.8), estimate)
+  )
+```
+
+Forest plot: `geom_point()` + `geom_errorbar()`, dodged so male/female don't overlap.
+
+```{r}
+ggplot(df, aes(estimate, disorder, col = sex)) +
+  geom_point(position = position_dodge(width = 0.2)) +
+  geom_errorbar(
+    aes(xmin = lower, xmax = upper),
+    width = 0.1,
+    position = position_dodge(width = 0.2)
+  ) +
+  theme_bw() +
+  labs(x = "HR (95% CI)", y = NULL)
+```
+
+The same plot, using a facet instead of dodging:
+
+```{r}
+ggplot(df, aes(estimate, disorder, col = sex)) +
+  geom_point() +
+  geom_errorbar(aes(xmin = lower, xmax = upper), width = 0.1) +
+  facet_grid(cols = vars(sex)) +
+  theme_bw() +
+  labs(x = "HR (95% CI)", y = NULL)
+```
+
+Combining plots: the patchwork package.
+
+```{r}
+# install.packages("patchwork")
+library(patchwork)
+```
+
+- `plot1 | plot2` -- plots side by side (can also use `+`)
+- `plot1 / plot2` -- plots stacked on top of each other
+- `plot_annotation()` -- annotate the combined figure (e.g. a title)
+- `plot_layout()` -- control layout, guides, and axes
+- `theme()` also works on a combined patchwork, just like in ggplot
+
+See <https://patchwork.data-imaginist.com/index.html>.
+
+`geom_text()`/`geom_label()`: labels.
+
+```{r}
+ggplot(iris, aes(Petal.Width, Petal.Length,
+                 label = paste(Petal.Width, Petal.Length, sep = ", "))) +
+  geom_point() +
+  geom_text()
+
+ggplot(iris, aes(Petal.Width, Petal.Length,
+                 label = paste(Petal.Width, Petal.Length, sep = ", "))) +
+  geom_point() +
+  geom_label()
+```
+
+`geom_abline()`/`geom_hline()`/`geom_vline()`: reference lines -- e.g. a dashed line at HR = 1 on the forest plot above.
+
+```{r}
+ggplot(df, aes(estimate, disorder, col = sex)) +
+  geom_point(position = position_dodge(width = 0.2)) +
+  geom_errorbar(
+    aes(xmin = lower, xmax = upper),
+    width = 0.1,
+    position = position_dodge(width = 0.2)
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  theme_bw() +
+  labs(x = "HR (95% CI)", y = NULL)
+```
+
+`theme()`: adjusting the theme in general (beyond a built-in `theme_*()`).
+
+```{r}
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species, shape = Species)) +
+  geom_point(size = 3, alpha = 0.6) +
+  labs(title = "Scatterplot") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    axis.title = element_text(size = 15)
+  )
+```
+
+`ggsave()`: saving a figure.
+
+```{r}
+#| eval: false
+ggplot(iris, aes(Petal.Length, Petal.Width, col = Species, shape = Species)) +
+  geom_point(size = 3, alpha = 0.6)
+
+ggsave("save_figure.pdf", dpi = 600, width = 10, height = 10)
+```
+
+It's impossible to remember every customization option -- googling is completely normal. This session is not an exhaustive list of what ggplot2 can do.
+
+A few more useful geoms for later:
+
+- `geom_point()` -- points
+- `geom_errorbar()` -- bars (useful for CIs with `geom_point()`)
+- `geom_text()` -- text labels on a plot
+- `geom_line()` -- lines
+- `geom_ribbon()` -- ribbons (useful for CIs with `geom_line()`)
+- `geom_histogram()` -- histogram
+- `geom_density()` -- density
+- `geom_smooth()` -- smoothed trend line
+- `geom_boxplot()` -- boxplot
+- `geom_abline`/`hline`/`vline()` -- reference lines (e.g. HR = 1)
+
+## Section 3. Strategies for writing efficient R code
+
+**Goal:**
+
+- Recognise common performance pitfalls
+- Apply simple strategies to write faster, cleaner R code
+
+### Walkthrough (follow along with the slides)
+
+```{r}
+
+
+```
+
+### Exercise
+
+```{r}
+
+
+```
+
+## Section 4. Guided practice: wrangling, visualization, and code efficiency
+
+**Goal:** Apply Day 3's ggplot2 skills in a single guided mini project.
+
+### Practice
+
+Today's guided practice is a standalone mini project focused on ggplot2 -- missing values/factors and joining/wrangling already got a combined mini project on Day 2, and code efficiency (Section 3) doesn't have a natural single dataset to combine everything into, so this one goes deep on visualization instead, building on the `mpg` exercise from the ggplot session.
+
+Open the separate project files instead of working in this document:
+
+- `Day 3 mini project - exercise.R` (work through this one)
+- `Day 3 mini project - exercise solutions.R` (only check this **after** attempting the exercise yourself)
+
+## End-of-day reflection
+
+1.  One thing I understood well today:
+
+    ------------------------------------------------------------------------
+
+2.  One thing that is still unclear:
+
+    ------------------------------------------------------------------------
+
+3.  One command or concept I think I will use again:
+
+    ------------------------------------------------------------------------
