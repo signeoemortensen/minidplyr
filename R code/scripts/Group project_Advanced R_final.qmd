@@ -1,0 +1,215 @@
+---
+title: "Project - Advanced R course 2026"
+format: html
+date: "2026-08-20"
+editor: visual
+---
+
+## Netflix Movie Data
+
+We start by loading the necessary libraries and the chosen data (called "What have we been watching on Netflix?") from tidyTuesdayR:
+
+```{r}
+#| warning: false
+
+# Load libraries
+library(tidytuesdayR)
+library(tidyverse)
+library(skimr)
+library(naniar)
+library(scales)
+
+# Load the Netflix movies data from tidyTuesdayR and convert character variables to factors
+netflix_data <- tt_load("2025-07-29")[[1]] %>% 
+  mutate(across(where(is.character), as.factor))
+```
+
+### 01. Data Import, Inspection and Assessment of Missingness
+
+We then inspect the data:
+
+```{r}
+# Examine variables:
+# - source: source file name
+# - report: report period
+# - title: movie title
+# - avaliable_globally: whether the movie is avaliable globally or not
+# - release_date: movie release date
+# - hours_viewed: hours spent viewing the movie
+# - runtime: movie runtime
+# - views: number of views (hours viewed / runtime)
+colnames(netflix_data)
+
+# Use the "skim" function to provide an overview of the data
+skim(netflix_data)
+```
+
+The above summary indicate a large number of missing data for the variable "release_date". We therefore investigate this further:
+
+```{r}
+# Plot the number of missings for each variable pr report period
+gg_miss_fct(netflix_data, report)
+
+# Plot the number of missing for each variable across each report period
+gg_miss_var(netflix_data, show_pct = TRUE, facet = report)
+```
+
+The percentage of missing values for the release date is approx. 80% across all four report periods. The above plots indicate the missingness is similar across the four report periods, so at least there thus not seem to be any systematic patterns. However, the large numbers mean statistical power is greatly reduced.
+
+### 02. Does the number of views change from July 2023 to June 2025?
+
+For the first part of the analysis, we want to examine how viewing behaviour changes with time and whether the global availability of a movie has an effect or not. We therefore plot the median views across all movies in the four report periods:
+
+```{r}
+#| warning: false
+
+# Determine summary data of views across all movies pr report period
+netflix_summary <- netflix_data %>%
+  filter(!is.na(available_globally),
+         available_globally != "Available Globally?") %>% 
+  group_by(report, available_globally) %>% 
+  mutate(
+    median_viewing = median(views, na.rm = TRUE),
+    Q1 = quantile(views, 0.25, na.rm = TRUE),
+    Q3 = quantile(views, 0.75, na.rm = TRUE)) %>% 
+  ungroup()
+
+# Visualize the median number of views across the report periods
+netflix_summary %>% 
+  ggplot(aes(x = median_viewing,
+           y = forcats::fct_rev(report),
+           col = available_globally)) +
+  geom_errorbar(
+    aes(xmin = Q1,
+        xmax = Q3),
+    width = 0.3,
+    position = position_dodge(width = 0.2)
+  ) +
+  geom_point(size = 3,
+             position = position_dodge(width = 0.2)) +
+  labs(y = "Report Period",
+       x = "Median number of views",
+       col = "Available globally?",
+       title = "Views across Report Periods") +
+  theme_classic() +
+  scale_y_discrete(
+    labels = c(
+      "2023Jul-Dec" = "Jul-Dec 2023",
+      "2024Jan-Jun" = "Jan-Jun 2024",
+      "2024Jul-Dec" = "Jul-Dec 2024",
+      "2025Jan-Jun" = "Janu-Jun 2025"
+    )
+  ) +
+  scale_x_continuous(labels = scales::comma) +
+  theme(text = element_text(size = 15),
+        axis.title = element_text(face = "bold"))
+```
+
+**Conclusion:** Overall, the number of views seem unchanged across the four report periods while the number of views is generally higher for movies that were available globally.
+
+### 03. Do movies get less popular over time?
+
+Next, we thought it would be interesting to see if there were changes in the number of views across the report periods for the same movies. Prior to this analysis, we wanted to identify a primary key to examine individual movies. We noticed several movies shared movie titles and therefore decided to combine movie title with release date to obtain unique movie IDs. As shown previously, a large number of missing data for the variable "release_date" is observed, nevertheless, for the purpose of this project, we decided to exclude all observations with missing release date in order to create the unique movie ID:
+
+```{r}
+# Subset of movies with a release date
+netflix_data_w_release <- netflix_data %>%
+  filter(!is.na(release_date)) %>% 
+  unite("movie_ID", title,
+        release_date,
+        remove = FALSE,
+        sep = "_")
+```
+
+To then explore the changes in number of views over time, we next sought to subset the movies that were available at Netflix across all four report periods:
+
+```{r}
+# Subset of movies avaliable across all four report periods
+shared_netflix_data <- netflix_data_w_release %>% 
+  group_by(movie_ID) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>%
+  filter(n == 4) %>% 
+  select(-n)
+```
+
+Finally, we plotted the median number of views per report period:
+
+```{r}
+# Determine summary data of views across subset of movies pr report period
+shared_summary <- shared_netflix_data %>% 
+  group_by(report) %>% 
+  mutate(
+    median_viewing = median(views, na.rm = TRUE),
+    Q1 = quantile(views, 0.25, na.rm = TRUE),
+    Q3 = quantile(views, 0.75, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+
+# Plot median number of views
+shared_summary %>%  
+  ggplot(aes(
+    x = median_viewing,
+    y = forcats::fct_rev(report)
+  )) +
+  geom_errorbar(
+    aes(xmin = Q1, xmax = Q3),
+    width = 0.3
+  ) +
+  geom_point(size = 3) +
+  labs(
+    y = "Report Period",
+    x = "Median number of views",
+    title = "Views across Report Periods"
+  ) +
+  theme_classic() +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_discrete(
+    labels = c(
+      "2023Jul-Dec" = "Jul-Dec 2023",
+      "2024Jan-Jun" = "Jan-Jun 2024",
+      "2024Jul-Dec" = "Jul-Dec 2024",
+      "2025Jan-Jun" = "Janu-Jun 2025"
+    )
+  ) +
+  theme(text = element_text(size = 15),
+        axis.title = element_text(face = "bold"))
+```
+
+**Conclusion:** The plot shows that the number of views generally decrease with time, as the median number of views are lower for more recent report periods. This is also what we would have predicted, with lost interest for older movies.
+
+### 04. Does the length of movie titles avaliable on Netflix change with time?
+
+At last, we aim to examine if the length of a movie title avaliable on Netflix changes over time:
+
+```{r}
+netflix_data_w_release %>% 
+  mutate(title_length = str_length(title)) %>% 
+  ggplot(aes(x = report,
+             y = title_length,
+             fill = report)) +
+  geom_boxplot() +
+  labs(x = "Report period",
+       y = "Length of title",
+       title = "The Length of Movie Titles") +
+  theme_classic() +
+  scale_x_discrete(
+    labels = c(
+      "2023Jul-Dec" = "Jul-Dec 2023",
+      "2024Jan-Jun" = "Jan-Jun 2024",
+      "2024Jul-Dec" = "Jul-Dec 2024",
+      "2025Jan-Jun" = "Janu-Jun 2025"
+    )
+  ) +
+  theme(text = element_text(size = 15),
+        axis.title = element_text(face = "bold"),
+        legend.position = "none")
+```
+
+**Conclusion:** The length of movie titles does not seem to have changed from July 2023 to June 2025.
+
+### Overall Conclusion
+
+In conclusion, this data indicates rather stable trends in Netflix viewing behavior over time. However, the data also seems to show that views of a given movie reduces with time, hence the popularity decreases.
+
+This project has taught us the importance of initial data inspection and assessment. It is essential to perform data quality checks prior to data analysis to avoid misleading or incorrect results. We found the packages "skimr" and "naniar" particularily useful to get an overview of the data and in this case identify a variable with high missingness. This initial inspection also made us release the key we thought was primary (i.e. movie title) was actually not unique, so we had to create a new primary key.

@@ -81,3 +81,14 @@ devtools::document()
 
 # Test if it work
 # build -> check 
+
+### fejl i load til github (install, check and merge step)
+
+
+devtools::check()
+
+## continuos check
+
+
+
+
